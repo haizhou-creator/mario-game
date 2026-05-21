@@ -67,19 +67,24 @@ const COIN_DATA = [
   [2670, 340], [2710, 340],
 ];
 
-// Mushrooms: [startX, y-top, patrolRange]
-// y = platform surface y − MUSHROOM_H so mushroom sits on top
-const MUSHROOM_H = 22, MUSHROOM_W = 22;
-const MUSHROOM_DATA = [
-  [300,  348, 50],   // platform y=370
-  [700,  348, 60],   // platform y=370
-  [890,  278, 45],   // platform y=300
-  [1290, 258, 40],   // platform y=280
-  [1690, 238, 45],   // platform y=260
-  [2090, 268, 40],   // platform y=290
-  [2480, 278, 45],   // platform y=300
-  [1600, 418, 70],   // ground
+// Question boxes: [x, y]  (32×32, Mario hits from below to spawn mushroom)
+const QBOX_W = 32, QBOX_H = 32;
+const QBOX_DATA = [
+  [210,  320],   // reachable from ground
+  [380,  255],   // above platform y=370
+  [560,  245],   // above platform y=310
+  [780,  285],   // reachable from ground
+  [980,  250],   // above platform y=300
+  [1160, 315],   // reachable from ground
+  [1460, 255],   // above platform y=340
+  [1760, 210],   // above platform y=260
+  [1970, 285],   // above platform y=340
+  [2210, 315],   // reachable from ground
+  [2570, 260],   // above platform y=300
+  [2880, 275],   // above platform y=310
 ];
+
+const MUSHROOM_H = 22, MUSHROOM_W = 22;
 
 const FLAG_X = 3050;
 
@@ -106,7 +111,7 @@ function rectOverlap(ax,ay,aw,ah, bx,by,bw,bh) {
 
 // ── Game state ───────────────────────────────────────────────────────────────
 let state, score, lives, cameraX;
-let player, platforms, enemies, coins, mushrooms, flag;
+let player, platforms, enemies, coins, mushrooms, qboxes, flag;
 let deathTimer, wonTimer;
 
 function resetGame() {
@@ -131,10 +136,8 @@ function buildLevel() {
     vx: 1.2, startX: x, range: r, dead: false, deadTimer: 0,
   }));
   coins     = COIN_DATA.map(([x,y]) => ({x, y, collected: false}));
-  mushrooms = MUSHROOM_DATA.map(([x,y,r]) => ({
-    x, y, startX: x, range: r,
-    vx: 1.0, collected: false,
-  }));
+  mushrooms = [];
+  qboxes    = QBOX_DATA.map(([x,y]) => ({x, y, hit: false, bumpTimer: 0}));
   flag = { x: FLAG_X, y: GROUND_Y - 160, w: 12, h: 160, reached: false };
   deathTimer = 0; wonTimer = 0;
 }
@@ -169,9 +172,15 @@ function updatePlayer() {
   if (player.x < 0) player.x = 0;
   if (player.x + player.w > LEVEL_W) player.x = LEVEL_W - player.w;
 
-  // Platform collision
+  // Combine platforms + question boxes into one solid list
+  const bumpY = b => b.y - (b.bumpTimer > 8 ? 16 - b.bumpTimer : b.bumpTimer);
+  const solids = [
+    ...platforms,
+    ...qboxes.map(b => ({x: b.x, y: bumpY(b), w: QBOX_W, h: QBOX_H, _box: b})),
+  ];
+
   player.onGround = false;
-  for (const p of platforms) {
+  for (const p of solids) {
     if (rectOverlap(player.x, player.y, player.w, player.h, p.x, p.y, p.w, p.h)) {
       const overlapBottom = (player.y + player.h) - p.y;
       const overlapTop    = (p.y + p.h) - player.y;
@@ -182,6 +191,7 @@ function updatePlayer() {
         player.y = p.y - player.h; player.vy = 0; player.onGround = true;
       } else if (minO === overlapTop && player.vy < 0) {
         player.y = p.y + p.h; player.vy = 0;
+        if (p._box && !p._box.hit) hitBox(p._box);  // head bump!
       } else if (minO === overlapLeft) {
         player.x = p.x - player.w;
       } else if (minO === overlapRight) {
@@ -219,6 +229,24 @@ function killPlayer() {
   deathTimer = 90;
 }
 
+// ── Question box logic ────────────────────────────────────────────────────────
+function hitBox(box) {
+  box.hit = true;
+  box.bumpTimer = 16;
+  // Mushroom pops out above the box, slides right with gravity
+  mushrooms.push({
+    x: box.x + QBOX_W / 2 - MUSHROOM_W / 2,
+    y: box.y - MUSHROOM_H - 2,
+    vx: 1.8, vy: 0, collected: false,
+  });
+}
+
+function updateQBoxes() {
+  for (const b of qboxes) {
+    if (b.bumpTimer > 0) b.bumpTimer--;
+  }
+}
+
 // ── Enemy logic ───────────────────────────────────────────────────────────────
 function updateEnemies() {
   for (const e of enemies) {
@@ -245,9 +273,23 @@ function updateEnemies() {
 function updateMushrooms() {
   for (const m of mushrooms) {
     if (m.collected) continue;
-    m.x += m.vx;
-    if (m.x <= m.startX - m.range || m.x + MUSHROOM_W >= m.startX + m.range) m.vx *= -1;
+    m.vy += GRAVITY * 0.85;
+    m.x  += m.vx;
+    m.y  += m.vy;
 
+    // Land on platforms
+    for (const p of platforms) {
+      if (rectOverlap(m.x, m.y, MUSHROOM_W, MUSHROOM_H, p.x, p.y, p.w, p.h)) {
+        if (m.vy >= 0) { m.y = p.y - MUSHROOM_H; m.vy = 0; }
+      }
+    }
+    // Bounce off level edges
+    if (m.x < 0)                        { m.x = 0;                    m.vx =  Math.abs(m.vx); }
+    if (m.x + MUSHROOM_W > LEVEL_W)     { m.x = LEVEL_W - MUSHROOM_W; m.vx = -Math.abs(m.vx); }
+    // Remove if it falls off screen
+    if (m.y > canvas.height + 60) { m.collected = true; continue; }
+
+    // Collect
     if (rectOverlap(player.x, player.y, player.w, player.h, m.x, m.y, MUSHROOM_W, MUSHROOM_H)) {
       m.collected = true;
       if (!player.big) growPlayer();
@@ -418,6 +460,41 @@ function drawMushrooms() {
   }
 }
 
+function drawQBoxes() {
+  for (const b of qboxes) {
+    const off = b.bumpTimer > 8 ? 16 - b.bumpTimer : b.bumpTimer;
+    const sx  = b.x - cameraX;
+    const sy  = b.y - off;
+    if (sx + QBOX_W < 0 || sx > canvas.width) continue;
+
+    if (b.hit) {
+      // Used (empty) box — grey
+      ctx.fillStyle = '#7f8c8d';
+      ctx.fillRect(sx, sy, QBOX_W, QBOX_H);
+      ctx.fillStyle = '#95a5a6';
+      ctx.fillRect(sx + 2, sy + 2, QBOX_W - 4, QBOX_H / 2);
+      ctx.strokeStyle = '#566573';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(sx + 1, sy + 1, QBOX_W - 2, QBOX_H - 2);
+    } else {
+      // Active ? box — gold
+      ctx.fillStyle = '#e67e22';
+      ctx.fillRect(sx, sy, QBOX_W, QBOX_H);
+      ctx.fillStyle = '#f39c12';
+      ctx.fillRect(sx + 2, sy + 2, QBOX_W - 4, QBOX_H / 2);
+      ctx.strokeStyle = '#d35400';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(sx + 1, sy + 1, QBOX_W - 2, QBOX_H - 2);
+      // ? mark
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 20px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('?', sx + QBOX_W / 2, sy + QBOX_H - 7);
+      ctx.textAlign = 'left';
+    }
+  }
+}
+
 function drawCoins() {
   for (const c of coins) {
     if (c.collected) continue;
@@ -515,6 +592,7 @@ function loop() {
   } else if (state === 'play') {
     updatePlayer();
     if (!player.dead) {
+      updateQBoxes();
       updateEnemies();
       updateMushrooms();
       updateCoins();
@@ -524,6 +602,7 @@ function loop() {
     drawBackground();
     drawFlag();
     drawPlatforms();
+    drawQBoxes();
     drawMushrooms();
     drawCoins();
     drawEnemies();
